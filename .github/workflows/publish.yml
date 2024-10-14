@@ -42,7 +42,7 @@ jobs:
         TWINE_USERNAME: "__token__"
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
       run: |
-        twine upload -r testpypi dist/*
+        twine upload dist/*
 
     - name: Publish to Test PyPI
       if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_target == 'testpypi'
@@ -50,4 +50,4 @@ jobs:
         TWINE_USERNAME: "__token__"
         TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
       run: |
-        twine upload dist/*
+        twine upload -r testpypi dist/*
