@@ -284,7 +284,137 @@ class BatchedInferencePipeline:
         vad_pipeline.instantiate(hyperparameters)
         return vad_pipeline
 
-    def transcribe(
+    def transcribe_batch(
+        self,
+        audios: List[Union[str, BinaryIO, np.ndarray]],
+        max_len: int = 30,
+        task: str = "transcribe",
+        beam_size: int = 5,
+        best_of: int = 5,
+        patience: float = 1.0,
+        length_penalty: float = 1.0,
+        repetition_penalty: float = 1.0,
+        no_repeat_ngram_size: int = 0,
+        temperature: Union[float, List[float]] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        compression_ratio_threshold: float = 2.4,
+        log_prob_threshold: float = -1.0,
+        no_speech_threshold: float = 0.6,
+        condition_on_previous_text: bool = True,
+        prompt_reset_on_temperature: float = 0.5,
+        initial_prompt: Union[str, List[int]] = None,
+        prefix: str = None,
+        suppress_blank: bool = True,
+        without_timestamps: bool = False,
+        max_initial_timestamp: float = 1.0,
+        word_timestamps: bool = False,
+        prepend_punctuations: str = "\"'“¿([{-",
+        append_punctuations: str = "\"'.。,，!！?？:：”)]}、",
+        multilingual: bool = False,
+        max_new_tokens: int = None,
+        hotwords: str = None,
+    ) -> Tuple[List[List[Segment]], List[TranscriptionInfo]]:
+        """
+        Transcribes multiple *independent* audios in a single batch.
+        Returns:
+          - a list of segment-lists (one for each audio in the batch)
+          - a list of `TranscriptionInfo` (one for each audio)
+
+        This method bypasses the chunking/VAD used for single-file long audios
+        and assumes each input is already padded or trimmed to the same length.
+        """
+
+        sampling_rate = self.model.feature_extractor.sampling_rate
+        prepared_features = []
+        metas = []
+
+        # Precompute the durations for each audio to build metadata
+        for audio in audios:
+            # decode if necessary
+            if not isinstance(audio, np.ndarray):
+                audio = decode_audio(audio, sampling_rate=sampling_rate)
+
+            # measure its length in seconds
+            duration_sec = len(audio) / sampling_rate
+
+            # compute mel spectrogram
+            feats = self.model.feature_extractor(audio)[
+                ..., :-1
+            ]  # shape (n_mels, n_frames)
+            # pad/truncate to max_len milliseconds
+            feats = pad_or_trim(feats, max_len * 100)
+
+            prepared_features.append(feats)
+            metas.append(
+                {
+                    "start_time": 0.0,
+                    "end_time": duration_sec,
+                }
+            )
+
+        features = np.stack(prepared_features, axis=0)
+
+        # 4) Build a single set of "TranscriptionOptions"
+        transcription_options = TranscriptionOptions(
+            beam_size=beam_size,
+            best_of=best_of,
+            patience=patience,
+            length_penalty=length_penalty,
+            repetition_penalty=repetition_penalty,
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            log_prob_threshold=log_prob_threshold,
+            no_speech_threshold=no_speech_threshold,
+            compression_ratio_threshold=compression_ratio_threshold,
+            condition_on_previous_text=condition_on_previous_text,
+            prompt_reset_on_temperature=prompt_reset_on_temperature,
+            temperatures=(
+                temperature if isinstance(temperature, (list, tuple)) else [temperature]
+            ),
+            initial_prompt=initial_prompt,
+            prefix=prefix,
+            suppress_blank=suppress_blank,
+            suppress_tokens=None,
+            without_timestamps=without_timestamps,
+            max_initial_timestamp=max_initial_timestamp,
+            word_timestamps=word_timestamps,
+            prepend_punctuations=prepend_punctuations,
+            append_punctuations=append_punctuations,
+            multilingual=multilingual,
+            max_new_tokens=max_new_tokens,
+            clip_timestamps="0",  # not used in this scenario
+            hallucination_silence_threshold=None,
+            hotwords=hotwords,
+        )
+
+        tokenizer = Tokenizer(
+            self.model.hf_tokenizer,
+            self.model.model.is_multilingual,
+            task=task,
+            language="en",
+        )
+
+        # 6) Actually run the model in batch:
+        all_results = self.forward(
+            features,  # shape [B, n_mels, n_frames]
+            tokenizer,
+            metas,  # metadata list of length B
+            transcription_options,
+        )
+
+        results = []
+        for _, subsegments_list in enumerate(all_results):
+            results_for_this_audio = {"text": "", "confidence": 0.0}
+
+            for subseg in subsegments_list:
+                results_for_this_audio["text"] += subseg["text"]
+                results_for_this_audio["confidence"] += np.exp(subseg["avg_logprob"])
+
+            results_for_this_audio["text"] = results_for_this_audio["text"].strip()
+            results_for_this_audio["confidence"] /= len(subsegments_list)
+            results.append(results_for_this_audio)
+
+        return results
+
+    def transcribe_single_file(
         self,
         audio: Union[str, torch.Tensor, np.ndarray],
         vad_segments: Optional[List[dict]] = None,
